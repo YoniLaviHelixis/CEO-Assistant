@@ -1,0 +1,297 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "$connections": {
+        "defaultValue": {},
+        "type": "Object"
+      }
+    },
+    "triggers": {
+      "Recurrence": {
+        "type": "Recurrence",
+        "recurrence": {
+          "frequency": "Day",
+          "interval": 1,
+          "timeZone": "Eastern Standard Time",
+          "schedule": {
+            "hours": [
+              8
+            ],
+            "minutes": [
+              45
+            ],
+            "weekDays": [
+              "Monday",
+              "Tuesday",
+              "Wednesday",
+              "Thursday",
+              "Friday"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Initialize_CEO_Email": {
+        "type": "InitializeVariable",
+        "description": "Set the CEO recipient address for the adaptive card.",
+        "inputs": {
+          "variables": [
+            {
+              "name": "CEOEmail",
+              "type": "string",
+              "value": "yonatan@qtrac.ai"
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Post_Adaptive_Card_AM": {
+        "type": "ApiConnection",
+        "description": "Post the CEO check-in adaptive card and wait for a response.",
+        "inputs": {
+          "body": {
+            "recipient": "@{variables('CEOEmail')}",
+            "message": {
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                  {
+                    "type": "TextBlock",
+                    "text": "CEO Check-In (AM)",
+                    "weight": "Bolder",
+                    "size": "Large"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "Use voice dictation. One task per line.",
+                    "wrap": true,
+                    "isSubtle": true
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "Top 3 outcomes today:",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "top3",
+                    "isMultiline": true,
+                    "placeholder": "1) Send board forecast\\n2) Finalize Walmart QBR agenda\\n3) Decide Insights v3 milestone"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "New tasks to capture → INBOX (capture):",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "inbox",
+                    "isMultiline": true,
+                    "placeholder": "FIN: Review CPA package\\nACC: TD migration note\\nBB2: Insights v3 pilot check-in"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "Blockers or decisions needed:",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "blockers",
+                    "isMultiline": true,
+                    "placeholder": "What is stuck + what decision is needed?"
+                  }
+                ],
+                "actions": [
+                  {
+                    "type": "Action.Submit",
+                    "title": "Submit"
+                  }
+                ]
+              }
+            }
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['teams']['connectionId']"
+            }
+          },
+          "method": "post",
+          "path": "/v3/conversations/flowbot/poster/teams"
+        },
+        "runAfter": {
+          "Initialize_CEO_Email": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Top3": {
+        "type": "Compose",
+        "description": "Extract the Top 3 text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_AM')?['data']?['top3']",
+        "runAfter": {
+          "Post_Adaptive_Card_AM": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Inbox": {
+        "type": "Compose",
+        "description": "Extract the Inbox text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_AM')?['data']?['inbox']",
+        "runAfter": {
+          "Compose_Top3": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Blockers": {
+        "type": "Compose",
+        "description": "Extract the blockers text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_AM')?['data']?['blockers']",
+        "runAfter": {
+          "Compose_Inbox": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Split_Top3": {
+        "type": "Compose",
+        "description": "Split the Top 3 input into an array of lines.",
+        "inputs": "@split(replace(replace(coalesce(outputs('Compose_Top3'),''),'\\r\\n','\\n'),'\\r','\\n'),'\\n')",
+        "runAfter": {
+          "Compose_Blockers": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Split_Inbox": {
+        "type": "Compose",
+        "description": "Split the Inbox input into an array of lines.",
+        "inputs": "@split(replace(replace(coalesce(outputs('Compose_Inbox'),''),'\\r\\n','\\n'),'\\r','\\n'),'\\n')",
+        "runAfter": {
+          "Split_Top3": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Apply_to_each_Top3": {
+        "type": "Foreach",
+        "description": "Create To Do tasks for each Top 3 item.",
+        "foreach": "@outputs('Split_Top3')",
+        "actions": {
+          "Create_Top3_Task": {
+            "type": "ApiConnection",
+            "description": "Create a task in the CEO — This Week list.",
+            "inputs": {
+              "body": {
+                "subject": "@trim(item())"
+              },
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['todo']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v1.0/me/todo/lists/@{encodeURIComponent('CEO — This Week')}/tasks"
+            },
+            "runtimeConfiguration": {
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT5S"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Split_Inbox": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Apply_to_each_Inbox": {
+        "type": "Foreach",
+        "description": "Create To Do tasks for each Inbox line.",
+        "foreach": "@outputs('Split_Inbox')",
+        "actions": {
+          "Create_Inbox_Task": {
+            "type": "ApiConnection",
+            "description": "Create a task in the INBOX (capture) list.",
+            "inputs": {
+              "body": {
+                "subject": "@trim(item())"
+              },
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['todo']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v1.0/me/todo/lists/@{encodeURIComponent('INBOX (capture)')}/tasks"
+            },
+            "runtimeConfiguration": {
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT5S"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Apply_to_each_Top3": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Post_Confirmation_AM": {
+        "type": "ApiConnection",
+        "description": "Send a confirmation message in Teams.",
+        "inputs": {
+          "body": {
+            "recipient": "@{variables('CEOEmail')}",
+            "message": {
+              "contentType": "text",
+              "content": "✅ AM check-in captured. Top 3 + Inbox are now in To Do."
+            }
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['teams']['connectionId']"
+            }
+          },
+          "method": "post",
+          "path": "/v3/conversations/flowbot/poster/teams"
+        },
+        "runAfter": {
+          "Apply_to_each_Inbox": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "parameters": {
+    "$connections": {
+      "value": {
+        "teams": {
+          "connectionId": "/providers/Microsoft.PowerApps/apis/shared_teams/connections/teams",
+          "connectionName": "teams",
+          "id": "/providers/Microsoft.PowerApps/apis/shared_teams"
+        },
+        "todo": {
+          "connectionId": "/providers/Microsoft.PowerApps/apis/shared_todo/connections/todo",
+          "connectionName": "todo",
+          "id": "/providers/Microsoft.PowerApps/apis/shared_todo"
+        }
+      }
+    }
+  }
+}

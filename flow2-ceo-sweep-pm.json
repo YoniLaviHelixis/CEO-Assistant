@@ -1,0 +1,336 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "$connections": {
+        "defaultValue": {},
+        "type": "Object"
+      }
+    },
+    "triggers": {
+      "Recurrence": {
+        "type": "Recurrence",
+        "recurrence": {
+          "frequency": "Day",
+          "interval": 1,
+          "timeZone": "Eastern Standard Time",
+          "schedule": {
+            "hours": [
+              15
+            ],
+            "minutes": [
+              30
+            ],
+            "weekDays": [
+              "Monday",
+              "Tuesday",
+              "Wednesday",
+              "Thursday",
+              "Friday"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Initialize_CEO_Email": {
+        "type": "InitializeVariable",
+        "description": "Set the CEO recipient address for the adaptive card.",
+        "inputs": {
+          "variables": [
+            {
+              "name": "CEOEmail",
+              "type": "string",
+              "value": "yonatan@qtrac.ai"
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Post_Adaptive_Card_PM": {
+        "type": "ApiConnection",
+        "description": "Post the CEO sweep adaptive card and wait for a response.",
+        "inputs": {
+          "body": {
+            "recipient": "@{variables('CEOEmail')}",
+            "message": {
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                  {
+                    "type": "TextBlock",
+                    "text": "CEO Sweep (PM)",
+                    "weight": "Bolder",
+                    "size": "Large"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "What must close today?",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "close",
+                    "isMultiline": true,
+                    "placeholder": "Item to close today"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "What moves to next week?",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "next",
+                    "isMultiline": true,
+                    "placeholder": "Item to move to next week"
+                  },
+                  {
+                    "type": "TextBlock",
+                    "text": "New items or risks discovered?",
+                    "wrap": true
+                  },
+                  {
+                    "type": "Input.Text",
+                    "id": "risks",
+                    "isMultiline": true,
+                    "placeholder": "Risks, issues, or new items"
+                  }
+                ],
+                "actions": [
+                  {
+                    "type": "Action.Submit",
+                    "title": "Submit"
+                  }
+                ]
+              }
+            }
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['teams']['connectionId']"
+            }
+          },
+          "method": "post",
+          "path": "/v3/conversations/flowbot/poster/teams"
+        },
+        "runAfter": {
+          "Initialize_CEO_Email": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Close": {
+        "type": "Compose",
+        "description": "Extract the close-today text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_PM')?['data']?['close']",
+        "runAfter": {
+          "Post_Adaptive_Card_PM": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Next": {
+        "type": "Compose",
+        "description": "Extract the next-week text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_PM')?['data']?['next']",
+        "runAfter": {
+          "Compose_Close": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Compose_Risks": {
+        "type": "Compose",
+        "description": "Extract the risks text from the adaptive card response.",
+        "inputs": "@body('Post_Adaptive_Card_PM')?['data']?['risks']",
+        "runAfter": {
+          "Compose_Next": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Split_Close": {
+        "type": "Compose",
+        "description": "Split the close-today input into an array of lines.",
+        "inputs": "@split(replace(replace(coalesce(outputs('Compose_Close'),''),'\\r\\n','\\n'),'\\r','\\n'),'\\n')",
+        "runAfter": {
+          "Compose_Risks": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Split_Next": {
+        "type": "Compose",
+        "description": "Split the next-week input into an array of lines.",
+        "inputs": "@split(replace(replace(coalesce(outputs('Compose_Next'),''),'\\r\\n','\\n'),'\\r','\\n'),'\\n')",
+        "runAfter": {
+          "Split_Close": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Split_Risks": {
+        "type": "Compose",
+        "description": "Split the risks input into an array of lines.",
+        "inputs": "@split(replace(replace(coalesce(outputs('Compose_Risks'),''),'\\r\\n','\\n'),'\\r','\\n'),'\\n')",
+        "runAfter": {
+          "Split_Next": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Apply_to_each_Close": {
+        "type": "Foreach",
+        "description": "Create To Do tasks for close-today items.",
+        "foreach": "@outputs('Split_Close')",
+        "actions": {
+          "Create_Close_Task": {
+            "type": "ApiConnection",
+            "description": "Create a CLOSE task in CEO — This Week.",
+            "inputs": {
+              "body": {
+                "subject": "@concat('CLOSE: ', trim(item()))"
+              },
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['todo']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v1.0/me/todo/lists/@{encodeURIComponent('CEO — This Week')}/tasks"
+            },
+            "runtimeConfiguration": {
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT5S"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Split_Risks": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Apply_to_each_Next": {
+        "type": "Foreach",
+        "description": "Create To Do tasks for next-week items.",
+        "foreach": "@outputs('Split_Next')",
+        "actions": {
+          "Create_Next_Task": {
+            "type": "ApiConnection",
+            "description": "Create a NEXT task in Monthly / Quarterly.",
+            "inputs": {
+              "body": {
+                "subject": "@concat('NEXT: ', trim(item()))"
+              },
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['todo']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v1.0/me/todo/lists/@{encodeURIComponent('Monthly / Quarterly')}/tasks"
+            },
+            "runtimeConfiguration": {
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT5S"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Apply_to_each_Close": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Apply_to_each_Risks": {
+        "type": "Foreach",
+        "description": "Create To Do tasks for risks or new items.",
+        "foreach": "@outputs('Split_Risks')",
+        "actions": {
+          "Create_Risk_Task": {
+            "type": "ApiConnection",
+            "description": "Create a RISK task in INBOX (capture).",
+            "inputs": {
+              "body": {
+                "subject": "@concat('RISK: ', trim(item()))"
+              },
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['todo']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v1.0/me/todo/lists/@{encodeURIComponent('INBOX (capture)')}/tasks"
+            },
+            "runtimeConfiguration": {
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT5S"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Apply_to_each_Next": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Post_Confirmation_PM": {
+        "type": "ApiConnection",
+        "description": "Send a confirmation message in Teams.",
+        "inputs": {
+          "body": {
+            "recipient": "@{variables('CEOEmail')}",
+            "message": {
+              "contentType": "text",
+              "content": "✅ PM sweep complete. All captured and filed."
+            }
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['teams']['connectionId']"
+            }
+          },
+          "method": "post",
+          "path": "/v3/conversations/flowbot/poster/teams"
+        },
+        "runAfter": {
+          "Apply_to_each_Risks": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "parameters": {
+    "$connections": {
+      "value": {
+        "teams": {
+          "connectionId": "/providers/Microsoft.PowerApps/apis/shared_teams/connections/teams",
+          "connectionName": "teams",
+          "id": "/providers/Microsoft.PowerApps/apis/shared_teams"
+        },
+        "todo": {
+          "connectionId": "/providers/Microsoft.PowerApps/apis/shared_todo/connections/todo",
+          "connectionName": "todo",
+          "id": "/providers/Microsoft.PowerApps/apis/shared_todo"
+        }
+      }
+    }
+  }
+}
